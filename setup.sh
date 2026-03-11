@@ -12,12 +12,12 @@ echo "================================================"
 
 # ── 1. Actualizar sistema ────────────────────────────────────
 echo ""
-echo "[1/6] Actualizando el sistema..."
+echo "[1/7] Actualizando el sistema..."
 sudo apt update -y && sudo apt upgrade -y
 
 # ── 2. Instalar dependencias del sistema ─────────────────────
 echo ""
-echo "[2/6] Instalando dependencias del sistema..."
+echo "[2/7] Instalando dependencias del sistema..."
 sudo apt install -y \
     python3-dev \
     python3-venv \
@@ -29,7 +29,7 @@ sudo apt install -y \
 
 # ── 3. Configurar audio I2S (MAX98357A) ──────────────────────
 echo ""
-echo "[3/6] Configurando audio I2S para MAX98357A..."
+echo "[3/7] Configurando audio I2S para MAX98357A..."
 
 CONFIG_FILE="/boot/firmware/config.txt"
 
@@ -49,9 +49,27 @@ else
     echo "  -> Overlay hifiberry-dac ya presente"
 fi
 
-# ── 4. Configurar volumen por software (softvol) ─────────────
+# ── 4. Habilitar SPI (RC522 RFID) ────────────────────────────
 echo ""
-echo "[4/6] Configurando softvol en ALSA..."
+echo "[4/7] Habilitando SPI para RC522..."
+
+if grep -q "^dtparam=spi=on" "$CONFIG_FILE"; then
+    echo "  -> SPI ya estaba habilitado"
+else
+    # Descomentar si está comentado
+    if grep -q "^#dtparam=spi=on" "$CONFIG_FILE"; then
+        sudo sed -i 's/^#dtparam=spi=on/dtparam=spi=on/' "$CONFIG_FILE"
+    else
+        echo "" | sudo tee -a "$CONFIG_FILE"
+        echo "# RC522 RFID SPI" | sudo tee -a "$CONFIG_FILE"
+        echo "dtparam=spi=on"   | sudo tee -a "$CONFIG_FILE"
+    fi
+    echo "  -> SPI habilitado"
+fi
+
+# ── 5. Configurar volumen por software (softvol) ─────────────
+echo ""
+echo "[5/7] Configurando softvol en ALSA..."
 
 ASOUND_FILE="/etc/asound.conf"
 
@@ -80,9 +98,9 @@ else
     echo "  -> /etc/asound.conf ya existe, no se modifica"
 fi
 
-# ── 5. Crear entorno virtual Python e instalar librerías ─────
+# ── 6. Crear entorno virtual Python e instalar librerías ─────
 echo ""
-echo "[5/6] Creando entorno virtual Python..."
+echo "[6/7] Creando entorno virtual Python..."
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
@@ -96,14 +114,14 @@ fi
 
 source venv/bin/activate
 pip install --upgrade pip
-pip install RPi.GPIO python-vlc flask
+pip install RPi.GPIO python-vlc flask mfrc522
 deactivate
 
-echo "  -> Librerías instaladas: RPi.GPIO, python-vlc"
+echo "  -> Librerías instaladas: RPi.GPIO, python-vlc, flask, mfrc522"
 
 # ── 6. Crear carpeta de audios ───────────────────────────────
 echo ""
-echo "[6/6] Creando estructura de carpetas..."
+echo "[7/7] Creando estructura de carpetas..."
 mkdir -p "$PROJECT_DIR/audios"
 mkdir -p "$PROJECT_DIR/tmp"
 echo "  -> Carpeta audios/ creada"
