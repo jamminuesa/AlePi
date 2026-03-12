@@ -4,7 +4,7 @@ player.py - Reproductor de audio con NFC, KY040 y modo configuración
 
 Flujo:
   - Lee assignments.json y espera tags NFC para reproducir el audio asignado
-  - El encoder KY040 controla el volumen; su botón hace play/pause
+  - La clase KY040 (gpiozero) gestiona volumen, play/pause y reinicio
   - El botón de configuración lanza el servidor web y pausa el reproductor
   - El LED ACT de la RPi indica el modo: fijo=reproducción, parpadeo=config
 
@@ -38,20 +38,22 @@ Botón configuración:
   Pin 2 -> GND    (Pin 14)
 """
 
-import RPi.GPIO as GPIO
-import vlc
-import json
+import sys
 import os
 import time
+import json
 import subprocess
 import threading
 
+import vlc
+from gpiozero import LED, Button
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'aux'))
+from ky040 import KY040
+
 # ── Pines ────────────────────────────────────────────────────
-CLK        = 17
-DT         = 27
-SW         = 22   # Botón encoder: play/pause
-SD         = 24   # Mute amplificador
-BTN_CONFIG = 23   # Botón modo configuración
+PIN_SD         = 24   # Mute amplificador MAX98357A
+PIN_BTN_CONFIG = 23   # Botón modo configuración
 
 # ── Rutas ────────────────────────────────────────────────────
 BASE_DIR         = os.path.expanduser("~/FaPi")
@@ -62,7 +64,7 @@ LED_TRIGGER_PATH = "/sys/class/leds/ACT/trigger"
 
 # ── Configuración ────────────────────────────────────────────
 VOLUME      = 30   # Volumen inicial (0-100)
-VOLUME_STEP = 2    # Cambio por tick del encoder
+VOLUME_STEP = 1    # Cambio por tick del encoder
 VOLUME_MAX  = 65   # Volumen máximo (ajustar para evitar distorsión)
 
 # ── Estado global ────────────────────────────────────────────
@@ -70,11 +72,21 @@ modo_config     = False
 server_proceso  = None
 led_thread      = None
 stop_led        = threading.Event()
-pausado_usuario = False  # True cuando el usuario pausa manualmente
+pausado_usuario = False
+ultimo_uid      = None
+
+# ── GPIO (gpiozero) ──────────────────────────────────────────
+amp_sd     = LED(PIN_SD)
+btn_config = Button(PIN_BTN_CONFIG, pull_up=True, bounce_time=0.05)
+
+def amp_mute(mute):
+    if mute:
+        amp_sd.off()
+    else:
+        amp_sd.on()
 
 # ── LED ACT ──────────────────────────────────────────────────
 def led_write(valor):
-    """Escribe en el LED ACT (requiere que trigger sea 'none')."""
     try:
         with open(LED_PATH, 'w') as f:
             f.write(str(valor))
@@ -82,7 +94,6 @@ def led_write(valor):
         pass
 
 def led_fijo(encendido=True):
-    """LED fijo encendido o apagado."""
     stop_led.set()
     try:
         with open(LED_TRIGGER_PATH, 'w') as f:
@@ -93,7 +104,6 @@ def led_fijo(encendido=True):
     led_write(1 if encendido else 0)
 
 def led_parpadeo(intervalo=0.2):
-    """LED parpadeando en hilo separado."""
     stop_led.clear()
     try:
         with open(LED_TRIGGER_PATH, 'w') as f:
@@ -112,7 +122,6 @@ def led_parpadeo(intervalo=0.2):
     led_thread.start()
 
 def led_restaurar():
-    """Devuelve el LED al comportamiento normal del sistema (actividad SD)."""
     stop_led.set()
     try:
         with open(LED_TRIGGER_PATH, 'w') as f:
@@ -131,22 +140,9 @@ def uid_to_hex(uid_int):
     h = format(uid_int, '08X')
     return ':'.join(h[i:i+2] for i in range(0, len(h), 2)).lstrip('0:').lstrip('0') or '00'
 
-# ── GPIO setup ───────────────────────────────────────────────
-GPIO.setmode(GPIO.BCM)
-GPIO.setwarnings(False)
-GPIO.setup(CLK,        GPIO.IN,  pull_up_down=GPIO.PUD_UP)
-GPIO.setup(DT,         GPIO.IN,  pull_up_down=GPIO.PUD_UP)
-GPIO.setup(SW,         GPIO.IN,  pull_up_down=GPIO.PUD_UP)
-GPIO.setup(SD,         GPIO.OUT)
-GPIO.setup(BTN_CONFIG, GPIO.IN,  pull_up_down=GPIO.PUD_UP)
-GPIO.output(SD, GPIO.LOW)
-
 # ── VLC ──────────────────────────────────────────────────────
 vlc_instance = vlc.Instance("--aout=alsa", "--alsa-audio-device=default")
 player       = vlc_instance.media_player_new()
-
-def amp_mute(mute):
-    GPIO.output(SD, GPIO.LOW if mute else GPIO.HIGH)
 
 def set_volume(vol):
     vol = max(0, min(VOLUME_MAX, vol))
@@ -165,12 +161,11 @@ def reproducir(audio_path):
     media = vlc_instance.media_new(audio_path)
     player.set_media(media)
     player.play()
-    # Esperar a que VLC esté realmente enviando audio antes de desmutear
-    for _ in range(30):  # máximo 3 segundos
+    for _ in range(30):
         time.sleep(0.1)
         if player.get_state() == vlc.State.Playing:
             break
-    time.sleep(0.1)  # pequeño margen extra para que el stream I2S se estabilice
+    time.sleep(0.1)
     amp_mute(False)
     print(f"  Reproduciendo: {os.path.basename(audio_path)}")
 
@@ -195,6 +190,49 @@ def toggle_play_pause():
         amp_mute(False)
         print("  Reproduciendo...")
 
+def reiniciar_pista():
+    global pausado_usuario, ultimo_uid
+    pausado_usuario = False
+    ultimo_uid      = None
+    state = player.get_state()
+    if state in (vlc.State.Playing, vlc.State.Paused):
+        amp_mute(True)
+        player.stop()
+        time.sleep(0.1)
+        player.play()
+        for _ in range(30):
+            time.sleep(0.1)
+            if player.get_state() == vlc.State.Playing:
+                break
+        time.sleep(0.1)
+        amp_mute(False)
+        print("  Pista reiniciada")
+
+# ── Callbacks KY040 ──────────────────────────────────────────
+def on_subir(valor):
+    global VOLUME
+    if modo_config:
+        return
+    VOLUME = set_volume(min(VOLUME + VOLUME_STEP, VOLUME_MAX))
+    print(f"  ↑ Volumen: {VOLUME}%")
+
+def on_bajar(valor):
+    global VOLUME
+    if modo_config:
+        return
+    VOLUME = set_volume(max(VOLUME - VOLUME_STEP, 0))
+    print(f"  ↓ Volumen: {VOLUME}%")
+
+def on_press():
+    if modo_config:
+        return
+    toggle_play_pause()
+
+def on_hold():
+    if modo_config:
+        return
+    reiniciar_pista()
+
 # ── Modo configuración ────────────────────────────────────────
 def entrar_modo_config():
     global modo_config, server_proceso
@@ -203,16 +241,13 @@ def entrar_modo_config():
     modo_config = True
     print("\n── Modo configuración ──────────────────")
 
-    # Pausar audio y mutear
     if player.get_state() == vlc.State.Playing:
         player.pause()
     amp_mute(True)
 
-    # LED parpadeo rápido
     led_parpadeo(intervalo=0.2)
 
-    # Lanzar servidor web
-    venv_python  = os.path.join(BASE_DIR, "venv/bin/python3")
+    venv_python   = os.path.join(BASE_DIR, "venv/bin/python3")
     server_script = os.path.join(BASE_DIR, "server.py")
     server_proceso = subprocess.Popen(
         [venv_python, server_script],
@@ -228,23 +263,23 @@ def salir_modo_config():
     modo_config = False
     print("\n── Modo reproductor ────────────────────")
 
-    # Detener servidor web
     if server_proceso and server_proceso.poll() is None:
         server_proceso.terminate()
         server_proceso.wait()
         print("  Servidor web detenido")
 
-    # LED fijo encendido
     led_fijo(True)
-    # Mantener amp muteado - se desmuteará cuando se reproduzca audio
     print("  Listo para leer tags NFC")
 
-# ── NFC en hilo separado ──────────────────────────────────────
-ultimo_uid = None
+def on_btn_config():
+    if not modo_config:
+        entrar_modo_config()
+    else:
+        salir_modo_config()
 
+# ── NFC en hilo separado ──────────────────────────────────────
 def suprimir_salida():
-    """Redirige stdout y stderr a /dev/null a nivel de OS."""
-    devnull = os.open(os.devnull, os.O_WRONLY)
+    devnull    = os.open(os.devnull, os.O_WRONLY)
     old_stdout = os.dup(1)
     old_stderr = os.dup(2)
     os.dup2(devnull, 1)
@@ -253,18 +288,17 @@ def suprimir_salida():
     return old_stdout, old_stderr
 
 def restaurar_salida(old_stdout, old_stderr):
-    """Restaura stdout y stderr."""
     os.dup2(old_stdout, 1)
     os.dup2(old_stderr, 2)
     os.close(old_stdout)
     os.close(old_stderr)
 
 def nfc_loop():
-    global ultimo_uid
+    global ultimo_uid, pausado_usuario
     try:
         from mfrc522 import SimpleMFRC522
-        reader  = SimpleMFRC522()
-        rdr     = reader.READER
+        reader = SimpleMFRC522()
+        rdr    = reader.READER
         print("  Lector NFC listo")
         while True:
             if modo_config:
@@ -280,21 +314,17 @@ def nfc_loop():
             restaurar_salida(*old)
 
             if uid:
-                uid_hex     = uid_to_hex(uid)
-                assignments = load_assignments()
-                audio_name  = assignments.get(uid_hex)
+                uid_hex    = uid_to_hex(uid)
+                audio_name = load_assignments().get(uid_hex)
 
                 if uid_hex != ultimo_uid:
-                    # Tag distinto: reproducir siempre
                     ultimo_uid      = uid_hex
                     pausado_usuario = False
                     if audio_name:
-                        audio_path = os.path.join(AUDIOS_DIR, audio_name)
                         print(f"\n  Tag: {uid_hex} → {audio_name}")
-                        reproducir(audio_path)
+                        reproducir(os.path.join(AUDIOS_DIR, audio_name))
                     else:
                         print(f"\n  Tag {uid_hex} sin asignar")
-                # Mismo tag: no hacer nada (respeta pausa manual)
 
             time.sleep(0.2)
     except Exception as e:
@@ -306,87 +336,40 @@ def nfc_loop():
 print("════════════════════════════════════════")
 print("  FaPi - Reproductor")
 print("════════════════════════════════════════")
-print("  Encoder : volumen / play-pause")
+print("  Encoder : volumen / play-pause / hold=reiniciar")
 print("  BTN CFG : modo configuración (GPIO23)")
 print("  Ctrl+C  : salir")
 print("════════════════════════════════════════\n")
 
+amp_mute(True)
 set_volume(VOLUME)
 led_fijo(True)
 
-# Arrancar hilo NFC
+# Inicializar KY040
+encoder = KY040(
+    clk=17, dt=27, sw=22,
+    on_clockwise=on_subir,
+    on_counter_clockwise=on_bajar,
+    on_press=on_press,
+    on_hold=on_hold,
+    max_steps=VOLUME_MAX,
+    min_steps=0,
+    hold_time=1.0,
+    bounce_time=0.05,
+)
+encoder.value = VOLUME
+
+# Botón configuración
+btn_config.when_pressed = on_btn_config
+
+# Hilo NFC
 nfc_thread = threading.Thread(target=nfc_loop, daemon=True)
 nfc_thread.start()
 
-ultimo_clk     = GPIO.input(CLK)
-ultimo_btn_cfg = GPIO.HIGH
-ultimo_tick    = 0  # timestamp del último tick válido del encoder
-
 # ── Bucle principal ───────────────────────────────────────────
 try:
-    while True:
-        # ── Botón configuración ──────────────────────────────
-        btn_cfg = GPIO.input(BTN_CONFIG)
-        if btn_cfg == GPIO.LOW and ultimo_btn_cfg == GPIO.HIGH:
-            time.sleep(0.05)  # debounce
-            if GPIO.input(BTN_CONFIG) == GPIO.LOW:
-                if not modo_config:
-                    entrar_modo_config()
-                else:
-                    salir_modo_config()
-        ultimo_btn_cfg = btn_cfg
-
-        # ── Encoder y botón play/pause (solo en modo reproductor) ──
-        if not modo_config:
-            clk = GPIO.input(CLK)
-            if clk != ultimo_clk:
-                dt = GPIO.input(DT)
-                if clk == GPIO.LOW:  # solo en flanco de bajada
-                    ahora = time.monotonic()
-                    if ahora - ultimo_tick > 0.05:  # ignorar eventos < 50ms
-                        ultimo_tick = ahora
-                        if dt == GPIO.HIGH:
-                            VOLUME = min(VOLUME + VOLUME_STEP, VOLUME_MAX)
-                            direccion = "↑ Sube"
-                        else:
-                            VOLUME = max(VOLUME - VOLUME_STEP, 0)
-                            direccion = "↓ Baja"
-                        VOLUME = set_volume(VOLUME)
-                        estado_amp = "ON" if GPIO.input(SD) == GPIO.HIGH else "MUTE"
-                        print(f"  {direccion} | Volumen: {VOLUME}% | Amp: {estado_amp}")
-            ultimo_clk = clk
-
-            if GPIO.input(SW) == GPIO.LOW:
-                press_start = time.monotonic()
-                # Esperar a que se suelte para medir duración
-                while GPIO.input(SW) == GPIO.LOW:
-                    time.sleep(0.01)
-                duracion = time.monotonic() - press_start
-
-                if duracion >= 1.0:
-                    # Pulsación larga: reiniciar pista desde el inicio
-                    pausado_usuario = False
-                    ultimo_uid      = None  # forzar re-detección del tag
-                    state = player.get_state()
-                    if state in (vlc.State.Playing, vlc.State.Paused):
-                        amp_mute(True)
-                        player.stop()
-                        time.sleep(0.1)
-                        player.play()
-                        for _ in range(30):
-                            time.sleep(0.1)
-                            if player.get_state() == vlc.State.Playing:
-                                break
-                        time.sleep(0.1)
-                        amp_mute(False)
-                        print("  Reiniciando pista desde el inicio")
-                else:
-                    # Pulsación corta: play/pause
-                    toggle_play_pause()
-                time.sleep(0.05)
-
-        time.sleep(0.01)
-
+    from signal import pause as signal_pause
+    signal_pause()
 except KeyboardInterrupt:
     print("\nSaliendo...")
 finally:
@@ -394,5 +377,5 @@ finally:
         server_proceso.terminate()
     amp_mute(True)
     player.stop()
+    encoder.close()
     led_restaurar()
-    GPIO.cleanup()

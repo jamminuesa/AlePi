@@ -21,6 +21,8 @@ echo "[2/7] Instalando dependencias del sistema..."
 sudo apt install -y \
     python3-dev \
     python3-venv \
+    swig \
+    liblgpio-dev \
     gcc \
     vlc \
     python3-vlc \
@@ -114,17 +116,46 @@ fi
 
 source venv/bin/activate
 pip install --upgrade pip
-pip install RPi.GPIO python-vlc flask mfrc522
+pip install python-vlc flask mfrc522 gpiozero rpi-lgpio spidev
 deactivate
 
-echo "  -> Librerías instaladas: RPi.GPIO, python-vlc, flask, mfrc522"
+echo "  -> Librerías instaladas: python-vlc, flask, mfrc522, gpiozero, rpi-lgpio"
 
 # ── 6. Crear carpeta de audios ───────────────────────────────
 echo ""
+
 echo "[7/7] Creando estructura de carpetas..."
 mkdir -p "$PROJECT_DIR/audios"
 mkdir -p "$PROJECT_DIR/tmp"
 echo "  -> Carpeta audios/ creada"
+
+# ── 8. Crear e instalar servicio systemd ─────────────────────
+echo ""
+REAL_USER="${SUDO_USER:-$USER}"
+echo "[8/8] Instalando servicio systemd fapi..."
+ 
+SERVICE_FILE="/etc/systemd/system/fapi.service"
+ 
+sudo bash -c "cat > $SERVICE_FILE" <<EOF
+[Unit]
+Description=FaPi - Reproductor de audio NFC
+After=network.target sound.target
+ 
+[Service]
+Type=simple
+User=$REAL_USER
+WorkingDirectory=$PROJECT_DIR
+ExecStart=$PROJECT_DIR/venv/bin/python3 $PROJECT_DIR/player.py
+Restart=on-failure
+RestartSec=5
+SupplementaryGroups=gpio spi i2c audio
+ 
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable fapi.service
 
 # ── Resumen final ────────────────────────────────────────────
 echo ""
