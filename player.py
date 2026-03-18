@@ -3,10 +3,14 @@
 player.py - Reproductor de audio con NFC, KY040 y modo configuración
 
 Flujo:
+  - Al arrancar reproduce un audio aleatorio de sounds/hello/
   - Lee assignments.json y espera tags NFC para reproducir el audio asignado
   - La clase KY040 (gpiozero) gestiona volumen, play/pause y reinicio
-  - El botón de configuración lanza el servidor web y pausa el reproductor
-  - El LED ACT de la RPi indica el modo: fijo=reproducción, parpadeo=config
+  - El botón de configuración comprueba red, reproduce sounds/no_network.wav
+    o sounds/configuration_mode.wav y lanza el servidor web
+  - El botón de apagado reproduce un audio aleatorio de sounds/goodbye/
+    y apaga el sistema de forma segura
+  - El LED ACT indica el modo: fijo=reproducción, parpadeo=config
 
 Conexiones KY040:
   CLK -> GPIO17 (Pin 11)
@@ -36,12 +40,18 @@ Conexiones RC522:
 Botón configuración:
   Pin 1 -> GPIO23 (Pin 16)
   Pin 2 -> GND    (Pin 14)
+
+Botón apagado:
+  Pin 1 -> GPIO16 (Pin 36)
+  Pin 2 -> GND    (Pin 34)
 """
 
 import sys
 import os
 import time
 import json
+import random
+import socket
 import subprocess
 import threading
 
@@ -52,20 +62,26 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'aux'))
 from ky040 import KY040
 
 # ── Pines ────────────────────────────────────────────────────
-PIN_SD         = 24   # Mute amplificador MAX98357A
-PIN_BTN_CONFIG = 23   # Botón modo configuración
+PIN_SD          = 24   # Mute amplificador MAX98357A
+PIN_BTN_CONFIG  = 23   # Botón modo configuración
+PIN_BTN_POWER   = 16   # Botón apagado
 
 # ── Rutas ────────────────────────────────────────────────────
 BASE_DIR         = os.path.expanduser("~/FaPi")
 AUDIOS_DIR       = os.path.join(BASE_DIR, "audios")
 ASSIGNMENTS_FILE = os.path.join(BASE_DIR, "assignments.json")
+SOUNDS_DIR       = os.path.join(BASE_DIR, "sounds")
+HELLO_DIR        = os.path.join(SOUNDS_DIR, "hello")
+GOODBYE_DIR      = os.path.join(SOUNDS_DIR, "goodbye")
+SND_NO_NETWORK   = os.path.join(SOUNDS_DIR, "no_network.wav")
+SND_CONFIG_MODE  = os.path.join(SOUNDS_DIR, "configuration_mode.wav")
 LED_PATH         = "/sys/class/leds/ACT/brightness"
 LED_TRIGGER_PATH = "/sys/class/leds/ACT/trigger"
 
 # ── Configuración ────────────────────────────────────────────
 VOLUME      = 30   # Volumen inicial (0-100)
-VOLUME_STEP = 1    # Cambio por tick del encoder
-VOLUME_MAX  = 65   # Volumen máximo (ajustar para evitar distorsión)
+VOLUME_STEP = 2    # Cambio por tick del encoder
+VOLUME_MAX  = 80   # Volumen máximo (ajustar para evitar distorsión)
 
 # ── Estado global ────────────────────────────────────────────
 modo_config     = False
@@ -78,6 +94,7 @@ ultimo_uid      = None
 # ── GPIO (gpiozero) ──────────────────────────────────────────
 amp_sd     = LED(PIN_SD)
 btn_config = Button(PIN_BTN_CONFIG, pull_up=True, bounce_time=0.05)
+btn_power  = Button(PIN_BTN_POWER,  pull_up=True, bounce_time=0.05)
 
 def amp_mute(mute):
     if mute:
@@ -129,6 +146,26 @@ def led_restaurar():
     except Exception:
         pass
 
+# ── Utilidades de audio ───────────────────────────────────────
+def audio_aleatorio(carpeta):
+    """Devuelve un archivo de audio aleatorio de la carpeta dada, o None."""
+    if not os.path.isdir(carpeta):
+        return None
+    archivos = [
+        f for f in os.listdir(carpeta)
+        if f.lower().endswith(('.wav', '.mp3', '.ogg', '.m4a'))
+    ]
+    return os.path.join(carpeta, random.choice(archivos)) if archivos else None
+
+def hay_red():
+    """Comprueba si hay conexión a internet intentando conectar a DNS de Google."""
+    try:
+        socket.setdefaulttimeout(3)
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect(("8.8.8.8", 53))
+        return True
+    except Exception:
+        return False
+
 # ── Assignments ───────────────────────────────────────────────
 def load_assignments():
     if os.path.exists(ASSIGNMENTS_FILE):
@@ -154,7 +191,8 @@ def set_volume(vol):
     return vol
 
 def reproducir(audio_path):
-    if not os.path.exists(audio_path):
+    """Reproduce un audio y espera a que VLC esté realmente en Playing."""
+    if not audio_path or not os.path.exists(audio_path):
         print(f"  Audio no encontrado: {audio_path}")
         return
     amp_mute(True)
@@ -168,6 +206,34 @@ def reproducir(audio_path):
     time.sleep(0.1)
     amp_mute(False)
     print(f"  Reproduciendo: {os.path.basename(audio_path)}")
+
+def reproducir_y_esperar(audio_path):
+    """Reproduce un audio y bloquea hasta que termina (para hello/goodbye)."""
+    if not audio_path or not os.path.exists(audio_path):
+        print(f"  Audio no encontrado: {audio_path}")
+        return
+    amp_mute(True)
+    media = vlc_instance.media_new(audio_path)
+    player.set_media(media)
+    player.play()
+    for _ in range(30):
+        time.sleep(0.1)
+        if player.get_state() == vlc.State.Playing:
+            break
+    time.sleep(0.1)
+    amp_mute(False)
+    print(f"  Reproduciendo: {os.path.basename(audio_path)}")
+    # Esperar a que termine, muteando antes del final para evitar el pop
+    while True:
+        state = player.get_state()
+        if state not in (vlc.State.Playing, vlc.State.Opening, vlc.State.Buffering):
+            break
+        # Mutear 300ms antes del final para evitar el pop de cierre del stream
+        remaining = player.get_length() - player.get_time()
+        if 0 < remaining < 300:
+            amp_mute(True)
+        time.sleep(0.05)
+    amp_mute(True)
 
 def toggle_play_pause():
     global pausado_usuario
@@ -238,12 +304,22 @@ def entrar_modo_config():
     global modo_config, server_proceso
     if modo_config:
         return
+
+    # Comprobar red antes de entrar
+    print("\n  Comprobando red...")
+    if not hay_red():
+        print("  Sin red — no se puede entrar en modo configuración")
+        reproducir_y_esperar(SND_NO_NETWORK)
+        return
+
     modo_config = True
     print("\n── Modo configuración ──────────────────")
 
     if player.get_state() == vlc.State.Playing:
         player.pause()
     amp_mute(True)
+
+    reproducir_y_esperar(SND_CONFIG_MODE)
 
     led_parpadeo(intervalo=0.2)
 
@@ -276,6 +352,26 @@ def on_btn_config():
         entrar_modo_config()
     else:
         salir_modo_config()
+
+# ── Apagado ───────────────────────────────────────────────────
+def on_btn_power():
+    print("\n── Apagando ────────────────────────────")
+    amp_mute(True)
+    player.stop()
+
+    # Reproducir goodbye aleatorio y esperar a que termine
+    audio = audio_aleatorio(GOODBYE_DIR)
+    if audio:
+        reproducir_y_esperar(audio)
+
+    # Limpiar
+    if server_proceso and server_proceso.poll() is None:
+        server_proceso.terminate()
+    encoder.close()
+    led_restaurar()
+
+    print("  Apagando el sistema...")
+    subprocess.run(["sudo", "poweroff"])
 
 # ── NFC en hilo separado ──────────────────────────────────────
 def suprimir_salida():
@@ -338,6 +434,7 @@ print("  FaPi - Reproductor")
 print("════════════════════════════════════════")
 print("  Encoder : volumen / play-pause / hold=reiniciar")
 print("  BTN CFG : modo configuración (GPIO23)")
+print("  BTN PWR : apagado seguro    (GPIO16)")
 print("  Ctrl+C  : salir")
 print("════════════════════════════════════════\n")
 
@@ -359,12 +456,19 @@ encoder = KY040(
 )
 encoder.value = VOLUME
 
-# Botón configuración
+# Botones
 btn_config.when_pressed = on_btn_config
+btn_power.when_pressed  = on_btn_power
 
 # Hilo NFC
 nfc_thread = threading.Thread(target=nfc_loop, daemon=True)
 nfc_thread.start()
+
+# Audio de bienvenida
+audio_hello = audio_aleatorio(HELLO_DIR)
+if audio_hello:
+    print(f"  Bienvenida: {os.path.basename(audio_hello)}")
+    reproducir_y_esperar(audio_hello)
 
 # ── Bucle principal ───────────────────────────────────────────
 try:
