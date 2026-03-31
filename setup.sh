@@ -7,7 +7,7 @@
 set -e  # Para si hay algún error
 
 echo "================================================"
-echo "  FaPi - Instalación del entorno"
+echo "  AleBox - Instalación del entorno"
 echo "================================================"
 
 # ── 1. Actualizar sistema ────────────────────────────────────
@@ -132,13 +132,13 @@ echo "  -> Carpeta audios/ creada"
 # ── 8. Crear e instalar servicio systemd ─────────────────────
 echo ""
 REAL_USER="${SUDO_USER:-$USER}"
-echo "[8/8] Instalando servicio systemd fapi..."
+echo "[8/8] Instalando servicio systemd alebox..."
  
-SERVICE_FILE="/etc/systemd/system/fapi.service"
+SERVICE_FILE="/etc/systemd/system/alebox.service"
  
 sudo bash -c "cat > $SERVICE_FILE" <<EOF
 [Unit]
-Description=FaPi - Reproductor de audio NFC
+Description=AleBox - Reproductor de audio NFC
 After=network.target sound.target
  
 [Service]
@@ -155,7 +155,7 @@ WantedBy=multi-user.target
 EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable fapi.service
+sudo systemctl enable alebox.service
 
 # ── Resumen final ────────────────────────────────────────────
 echo ""
