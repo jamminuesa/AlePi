@@ -51,7 +51,7 @@ LED_PATH           = "/sys/class/leds/ACT/brightness"
 LED_TRIGGER_PATH   = "/sys/class/leds/ACT/trigger"
 
 # ── Configuración ────────────────────────────────────────────
-VOLUME        = 50
+VOLUME        = 70
 VOLUME_STEP   = 5
 VOLUME_MAX    = 150
 SKIP_SECONDS  = 30    # segundos de avance/retroceso rápido
@@ -77,6 +77,7 @@ pausado_usuario = False
 ultimo_uid      = None
 modo_repetir    = False  # no usado actualmente (reservado)
 arranque_listo  = False  # False hasta que el audio de bienvenida termina
+seek_lock       = threading.Lock()
 
 # ── GPIO ─────────────────────────────────────────────────────
 amp_sd     = LED(PIN_SD)
@@ -329,7 +330,8 @@ def toggle_play_pause():
 
 def _seek(nuevo_ms, etiqueta):
     """Salta a nuevo_ms de forma limpia: mutea, salta y desmutea en hilo separado.
-    El lock evita que dos seeks se solapen."""
+    El lock evita que dos 
+seeks se solapen."""
     if not seek_lock.acquire(blocking=False):
         return
     estaba_playing = player.get_state() == vlc.State.Playing

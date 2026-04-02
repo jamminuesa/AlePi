@@ -114,16 +114,20 @@
       margin: 0 auto;
       padding: 20px 24px 60px;
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       grid-template-rows: auto;
-      gap: 28px;
+      gap: 16px;
     }
     .stats-bar   { grid-column: 1 / -1; }
     .card-upload { grid-column: 1; }
     .card-library { grid-column: 1; }
     .card-nfc    { grid-column: 2; grid-row: 2 / 4; }
     @media (max-width: 720px) {
-      main { grid-template-columns: 1fr; }
+      main { 
+          grid-template-columns: minmax(0, 1fr);
+          padding: 10px 8px 40px;
+          gap: 16px;
+      }
       .card-nfc { grid-column: 1; grid-row: auto; }
     }
 
@@ -131,7 +135,7 @@
     .card {
       background: var(--card);
       border-radius: var(--radius);
-      padding: 28px;
+      padding: 20px;
       box-shadow: var(--shadow);
       border: 3px solid transparent;
       animation: fadein 0.7s both;
