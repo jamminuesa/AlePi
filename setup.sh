@@ -157,6 +157,26 @@ EOF
 sudo systemctl daemon-reload
 sudo systemctl enable alebox.service
 
+# ── 9. Configurar DNS para hotspot (dnsmasq) ──────────────────
+echo ""
+echo "[9/9] Configurando DNS para el hotspot AleBox-Setup..."
+ 
+DNSMASQ_DIR="/etc/NetworkManager/dnsmasq-shared.d"
+mkdir -p "$DNSMASQ_DIR"
+ 
+cat > "$DNSMASQ_DIR/alebox.conf" <<'EOF'
+address=/alebox.box/192.168.4.1
+address=/alebox.local/192.168.4.1
+address=/ale.box/192.168.4.1
+ 
+# Opcional: portal cautivo (todo apunta a la RPi)
+address=/#/192.168.4.1
+EOF
+ 
+chmod 644 "$DNSMASQ_DIR/alebox.conf"
+echo "  -> /etc/NetworkManager/dnsmasq-shared.d/alebox.conf creado"
+echo "  -> Cuando el hotspot esté activo, accede via: http://alebox.box:8000"
+
 # ── Resumen final ────────────────────────────────────────────
 echo ""
 echo "================================================"

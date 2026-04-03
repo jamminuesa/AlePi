@@ -924,6 +924,8 @@
     try {
       await fetch('/api/exit_config', { method: 'POST' });
       showToast('✅ Volviendo al reproductor...');
+      setTimeout(() => window.close(), 1500);
+      showToast('Cierra la pestaña');
     } catch(e) {
       showToast('❌ No se pudo conectar con el reproductor');
     }
